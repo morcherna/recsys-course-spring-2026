@@ -1,25 +1,17 @@
 import json
 import pickle
 import numpy as np
-from collections import defaultdict
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
-print("1. Загружаем модель и данные...")
-
-# Загружаем модель
-with open('botify/botify/model.pkl', 'rb') as f:
-    model = pickle.load(f)
-
-# Загружаем эмбеддинги
+print("1. Загружаем...")
+with open('botify/botify/model_reg.pkl', 'rb') as f: model_reg = pickle.load(f)
+with open('botify/botify/model_clf.pkl', 'rb') as f: model_clf = pickle.load(f)
 embeddings = np.load('botify/botify/embeddings.npy')
+with open('botify/botify/feature_names.pkl', 'rb') as f: feature_names = pickle.load(f)
+with open('botify/botify/track_popularity.pkl', 'rb') as f: track_popularity = pickle.load(f)
 
-# Загружаем имена признаков
-with open('botify/botify/feature_names.pkl', 'rb') as f:
-    feature_names = pickle.load(f)
-
-# Загружаем оригинальные SasRec I2I рекомендации
 sasrec_i2i = {}
 with open('botify/data/sasrec_i2i.jsonl', 'r') as f:
     for line in f:
@@ -27,72 +19,55 @@ with open('botify/data/sasrec_i2i.jsonl', 'r') as f:
         sasrec_i2i[int(data['item_id'])] = [int(r) for r in data['recommendations']]
 
 print(f"Загружено {len(sasrec_i2i)} I2I словарей")
-print(f"Эмбеддинги: {embeddings.shape}")
 
-print("\n2. Генерируем улучшенные рекомендации...")
-
-# Для каждого трека ранжируем его I2I кандидатов моделью
+print("\n2. Генерируем...")
 improved_i2i = {}
 
-for item_id in tqdm(sasrec_i2i.keys()):
-    if item_id >= len(embeddings):
-        continue
+for item_id in tqdm(list(sasrec_i2i.keys())[:15000]):
+    if item_id >= len(embeddings): continue
     
-    # Берём кандидатов из SasRec I2I
-    candidates = sasrec_i2i.get(item_id, [])
-    candidates = [c for c in candidates if c < len(embeddings)]
-    
+    candidates = [c for c in sasrec_i2i.get(item_id, []) if c < len(embeddings)]
     if len(candidates) <= 1:
         improved_i2i[item_id] = candidates[:10]
         continue
     
-    # Для каждого кандидата извлекаем признаки
-    track_emb = embeddings[item_id]
-    
+    track_emb = embeddings[item_id].astype(np.float32)
     features_list = []
-    valid_candidates = []
     
     for cand_id in candidates:
-        cand_emb = embeddings[cand_id]
+        cand_emb = embeddings[cand_id].astype(np.float32)
+        cos_sim = float(np.dot(track_emb, cand_emb))
         
-        # Признаки (как при обучении)
-        cos_hist_current = float(np.dot(track_emb, cand_emb))
-        
-        feat = {}
+        feat = {name: 0.0 for name in feature_names}
         for name in feature_names:
-            if name == 'cos_hist_current':
-                feat[name] = cos_hist_current
-            elif name == 'cos_current_rec':
-                feat[name] = cos_hist_current  # Используем item_id как историю
-            elif name == 'cos_hist_rec':
-                feat[name] = cos_hist_current
-            elif name.startswith('hist_emb_'):
-                feat[name] = 0.0
-            else:
-                feat[name] = 0.0
+            if 'cos_' in name:
+                feat[name] = cos_sim
         
-        features_list.append([feat.get(name, 0.0) for name in feature_names])
-        valid_candidates.append(cand_id)
+        cp = track_popularity.get(item_id, {})
+        feat['current_play_count'] = np.log1p(cp.get('play_count', 0))
+        feat['current_avg_time'] = cp.get('avg_listen_time', 0.5)
+        feat['current_skip_rate'] = cp.get('skip_rate', 0.5)
+        
+        rp = track_popularity.get(cand_id, {})
+        feat['rec_play_count'] = np.log1p(rp.get('play_count', 0))
+        feat['rec_avg_time'] = rp.get('avg_listen_time', 0.5)
+        feat['rec_skip_rate'] = rp.get('skip_rate', 0.5)
+        
+        features_list.append([feat[name] for name in feature_names])
     
-    if not valid_candidates:
-        continue
+    X = np.array(features_list, dtype=np.float32)
+    time_pred = model_reg.predict(X)
+    skip_pred = model_clf.predict_proba(X)[:, 1]
+    ensemble_scores = time_pred * (1 - skip_pred)
     
-    # Предсказываем скоры
-    X = np.array(features_list, dtype=float)
-    scores = model.predict_proba(X)[:, 1]
-    
-    # Сортируем кандидатов по скору
-    sorted_candidates = [c for _, c in sorted(zip(scores, valid_candidates), key=lambda x: x[0], reverse=True)]
-    
+    sorted_candidates = [c for _, c in sorted(zip(ensemble_scores, candidates), key=lambda x: x[0], reverse=True)]
     improved_i2i[item_id] = sorted_candidates[:10]
 
-print(f"\nСгенерировано рекомендаций для {len(improved_i2i)} треков")
+print(f"Сгенерировано для {len(improved_i2i)} треков")
 
-# Сохраняем в JSON Lines
-print("\n3. Сохраняем результат...")
+print("\n3. Сохраняем...")
 with open('botify/data/improved_i2i.jsonl', 'w') as f:
     for item_id, recs in improved_i2i.items():
         f.write(json.dumps({'item_id': item_id, 'recommendations': recs}) + '\n')
 
-print("✅ Готово! Файл: botify/data/improved_i2i.jsonl")
-print(f"Пример (item_id=0): {improved_i2i.get(0, 'нет')[:5]}")
+print("✅ Готово!")
