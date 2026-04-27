@@ -69,4 +69,4 @@ class Experiments:
     IMPROVED = Experiment("IMPROVED", Split.HALF_HALF)
 
     def __init__(self):
-        self.experiments = [Experiments.HSTU]
+        self.experiments = [Experiments.IMPROVED]
