@@ -17,6 +17,7 @@ from botify.recommenders.random import Random
 from botify.recommenders.indexed import Indexed
 from botify.recommenders.sticky_artist import StickyArtist
 from botify.track import Catalog
+from botify.recommenders.contextual_indexed import ContextualIndexedRecommender
 
 root = logging.getLogger()
 root.setLevel("INFO")
@@ -124,8 +125,11 @@ class NextTrack(Resource):
         if treatment == Treatment.C:
             recommender = sasrec_i2i_recommender
         else:
-            recommender = Indexed(recommendations_improved_redis.connection, catalog, random_recommender)
-
+            recommender = ContextualIndexedRecommender(
+                listen_history_redis.connection,
+                recommendations_improved_redis.connection,
+                random_recommender,
+            )
         recommendation = recommender.recommend_next(user, args.track, args.time)
 
         data_logger.log(
